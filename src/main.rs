@@ -88,6 +88,9 @@ impl Peer {
                             println!("Added peer with ID: {:?} to broadcast list", peer_id);
                         }
                     },
+                    FloodsubEvent::Message(message) => {
+                        println!("{:?}", String::from_utf8(message.data).expect("data as Vec<u8>"));
+                    },
                     _ => println!("{:?}", event), 
                 }
             }
@@ -100,7 +103,7 @@ impl Peer {
     pub fn broadcast_message(&mut self) {
         self.swarm.behaviour_mut().publish(
             self.floodsub_topic.clone(),
-            "ciao"
+            "ciao!"
         );
     }
 }
@@ -111,7 +114,7 @@ use futures::{
 
 
 async fn broadcast_message_future() {
-    sleep(Duration::from_millis(10)).await;
+    sleep(Duration::from_millis(100)).await;
 }
 
 #[async_std::main]
