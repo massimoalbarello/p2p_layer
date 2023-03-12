@@ -52,10 +52,8 @@ pub struct Peer {
 
 impl Peer {
     pub async fn new(
-        replica_number: u8,
         topic: &str,
     ) -> Self {
-        let starting_round = 1;
         // Create a random PeerId
         let local_key = Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
@@ -175,7 +173,6 @@ async fn broadcast_message_future() {
 async fn main() {
 
     let mut my_peer = Peer::new(
-        1,
         "gossip_blocks",
     )
     .await;
