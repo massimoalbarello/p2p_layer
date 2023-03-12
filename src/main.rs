@@ -1,10 +1,15 @@
-use futures::{prelude::stream::StreamExt};
+use std::{time::Duration, collections::BTreeSet};
+
+use futures::{prelude::stream::StreamExt, FutureExt};
+use async_std::task::sleep;
+
 use libp2p::{
    
     identity::Keypair,
     swarm::SwarmEvent,
     PeerId, Swarm,
-    ping::{Ping, PingEvent, PingConfig}, Multiaddr
+    floodsub::{Floodsub, FloodsubEvent, Topic},
+    Multiaddr
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +19,10 @@ pub enum Message {
 }
 
 pub struct Peer {
-    swarm: Swarm<Ping>,
+    local_peer_id: PeerId,
+    swarm: Swarm<Floodsub>,
+    floodsub_topic: Topic,
+    subscribed_peers: BTreeSet<PeerId>,
 }
 
 impl Peer {
@@ -23,17 +31,23 @@ impl Peer {
         // Create a random PeerId
         let local_key = Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
-        println!("Local peer id {:?}", local_peer_id);
 
         // Set up an encrypted DNS-enabled TCP Transport
         let transport = libp2p::development_transport(local_key).await.unwrap();
 
+        // Create a Floodsub topic
+        let floodsub_topic = Topic::new("topic");
+
         // Create a Swarm to manage peers and events
         let local_peer = Self {
+            local_peer_id,
             swarm: {
-                let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
+                let mut behaviour = Floodsub::new(local_peer_id);
+                behaviour.subscribe(floodsub_topic.clone());
                 Swarm::new(transport, behaviour, local_peer_id)
             },
+            floodsub_topic,
+            subscribed_peers: BTreeSet::new(),
         };
         local_peer
     }
@@ -48,23 +62,46 @@ impl Peer {
             .expect("swarm can be started");
         if let Some(remote_peer) = std::env::args().nth(1) {
             let remote_peer_multiaddr: Multiaddr = remote_peer.parse().expect("valid address");
-            self.swarm.dial(remote_peer_multiaddr).expect("known peer");
+            self.swarm.dial(remote_peer_multiaddr.clone()).expect("known peer");
             println!("Dialed remote peer: {:?}", remote_peer);
+            let remote_peer_id = PeerId::try_from_multiaddr(&remote_peer_multiaddr).expect("multiaddress with peer ID");
+            self.swarm
+                .behaviour_mut()
+                .add_node_to_partial_view(remote_peer_id);
+            println!("Added peer with ID: {:?} to broadcast list", remote_peer_id);
         }
     }
 
-    pub fn match_event<T>(&mut self, event: SwarmEvent<PingEvent, T>) {
+    pub fn match_event<T>(&mut self, event: SwarmEvent<FloodsubEvent, T>) {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
-                println!("Listening on {:?}", address);
+                println!("{}", format!("{}/p2p/{}", address, self.local_peer_id.to_string()));
             }
             SwarmEvent::Behaviour(event) => {
-                println!("{:?}", event)
+                match event {
+                    FloodsubEvent::Subscribed { peer_id, .. } => {
+                        if !self.subscribed_peers.contains(&peer_id) {
+                            self.swarm
+                                .behaviour_mut()
+                                .add_node_to_partial_view(peer_id);
+                            self.subscribed_peers.insert(peer_id);
+                            println!("Added peer with ID: {:?} to broadcast list", peer_id);
+                        }
+                    },
+                    _ => println!("{:?}", event), 
+                }
             }
             _ => {
                 // println!("Unhandled swarm event");
             }
         }
+    }
+
+    pub fn broadcast_message(&mut self) {
+        self.swarm.behaviour_mut().publish(
+            self.floodsub_topic.clone(),
+            "ciao"
+        );
     }
 }
 
@@ -72,6 +109,10 @@ use futures::{
     select,
 };
 
+
+async fn broadcast_message_future() {
+    sleep(Duration::from_millis(10)).await;
+}
 
 #[async_std::main]
 async fn main() {
@@ -84,6 +125,11 @@ async fn main() {
     // Process events
     loop {
         select! {
+            _ = broadcast_message_future().fuse() => {
+                // prevent Mdns expiration event by periodically broadcasting keep alive messages to peers
+                // if any locally generated artifact, broadcast it
+                my_peer.broadcast_message();
+            },
             event = my_peer.swarm.select_next_some() => my_peer.match_event(event),
         }
     }
